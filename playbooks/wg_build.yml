@@ -1,0 +1,253 @@
+---
+# First play is used to create a new linode with your Linode portal API Token as below play
+- name: CREATE A NEW LINODE
+  hosts: localhost
+  tags: [ always, infra ] # those tags can be used for easy access to a particular play of the whole playbook
+  vars_files:
+    - ../vars/linode_wg.yml
+
+  tasks:
+    - name: Create a new Linode.
+      linode_v4:
+        label: "{{ hostname }}"
+        access_token: "{{ token }}"
+        type: "{{ type }}"
+        region: "{{ region }}"
+        image: "{{ image }}"
+        root_pass: "{{ password }}"
+        authorized_keys: "{{ ssh_keys }}"
+        group: "{{ gt }}"
+        tags: "{{ gt }}"
+        state: present
+      register: tyla
+
+    - name: Display info about my Linode instance # this task is used for the new Linode verificaiton
+      debug:
+        msg: "{{ hostname }} | {{ tyla.instance.id }} | {{ tyla.instance.ipv4[0] }}"
+
+    - name: Add new host to in-memory inventory # this task is used to add the Linode public IP to Ansible in-memory inventory along with its group name
+      add_host:
+        name: "{{ tyla.instance.ipv4[0] }}"
+        groups: linode_wg
+      changed_when: false
+
+    - name: Wait for Linode to listen on port 22 # ensure that the new Linode is running and ready to move on with the next play
+      wait_for:
+        state: started
+        host: "{{ tyla.instance.ipv4[0] }}"
+        port: 22
+
+# Second play is used for a standard initial configuration required on Ubuntu 20.04 Linux box
+- name: INITIAL CONFIGURATION ON THE NEW LINODE
+  tags: init
+  hosts: linode_wg
+  user: root
+  vars_files:
+    - ../vars/linode_wg.yml
+
+  tasks:
+    - name: Initial Linode Configuration
+      tags: conf
+      block: # block is used here for controlling which set of tasks in each I want to execute. e.g., here I tag 'conf'
+        - name: Set hostname
+          hostname: name="{{ hostname }}"
+
+        - name: Update apt repo and cache
+          apt: update_cache=yes force_apt_get=yes cache_valid_time=3600
+
+        - name: Upgrade all apt packages
+          apt: upgrade=dist force_apt_get=yes
+
+        - name: Check if a reboot is needed after apt upgrade
+          register: reboot
+          stat: path=/var/run/reboot-required get_md5=no
+
+        - name: Reboot the Ubuntu Linode
+          reboot:
+            msg: "Reboot initiated by Ansible due to kernel updates"
+            connect_timeout: 5
+            reboot_timeout: 300
+            pre_reboot_delay: 0
+            post_reboot_delay: 30
+            test_command: uptime
+          when: reboot.stat.exists
+
+        - name: Enable packet forwarding for IPv4 # this task is important for WireGuard to work correctly by allowing IP forwarding thru the node
+          sysctl:
+            name: net.ipv4.ip_forward
+            value: '1'
+            sysctl_set: true
+            state: present
+            reload: true
+
+        - name: Configure SSH key authentication only # desired state of /etc/ssh/sshd_config is used to restrict ssh remote access
+          copy: src=../files/sshd_config dest=/etc/ssh/sshd_config
+          notify: Restart SSH
+
+        - name: Allow SSH in UFW
+          ufw:
+            rule: limit
+            port: ssh
+            proto: tcp
+            src: {{ my_ip }}
+            dest: 0.0.0.0/0
+
+        - name: Allow WireGuard in UFW
+          ufw:
+            rule: allow
+            port: '51820'
+            proto: udp
+            dest: 0.0.0.0/0
+
+        - name: Deny everything and enable UFW
+          ufw:
+            state: enabled
+            policy: deny
+            log: true
+
+    - name: Unit testing on initial configuration # unit testing to verify the system configured and tags are used to run specific block
+      tags: [ never, tests, conf_test ]
+      block: 
+        - name: Get the output of /etc/sysctl.conf file
+          command: tail -1 /etc/sysctl.conf
+          register: sysctl
+          changed_when: false
+
+        - name: Test if /etc/sysctl.conf is configured correctly
+          assert:
+            that:
+              - "'net.ipv4.ip_forward=1' in sysctl.stdout_lines"
+            success_msg: "[PASS] IP Forwarding is configured correctly."
+            fail_msg: "[FAIL] IP Forwarding is not configured or misconfigred."
+
+        - name: Get the output of /etc/ssh/sshd_config
+          command: cat /etc/ssh/sshd_config
+          register: ssh
+          changed_when: false
+
+        - name: Test if /etc/ssh/sshd_config is configured correctly
+          assert:
+            that:
+              - "'PermitRootLogin yes' in ssh.stdout_lines"
+              - "'PubkeyAuthentication yes' in ssh.stdout_lines"
+              - "'PasswordAuthentication no' in ssh.stdout_lines"
+              - "'PermitEmptyPasswords no' in ssh.stdout_lines"
+            success_msg: "[PASS] SSH Daemon is configured correctly."
+            fail_msg: "[FAIL] IP Forwarding is not configured or misconfigred."
+
+  handlers:
+    - name: Restart SSH
+      systemd:
+        state: restarted
+        name: ssh
+
+# Third play is for WireGuard installation and configuration for both server and peers
+- name: WIREGUARD INSTALLATION AND CONFIGURATION
+  tags: wg
+  hosts: linode_wg
+  user: root
+  vars_files:
+    - ../vars/linode_wg.yml
+
+  tasks:
+    - name: Installing and Configurating WireGuard
+      block:
+        - name: Install WireGuard and QRencode on the Linode
+          apt:
+            name: [ wireguard, qrencode ]
+            state: present
+  
+        - name: Generate WireGuard keypair
+          shell: wg genkey | tee /etc/wireguard/pri | wg pubkey > /etc/wireguard/pub
+          args:
+            creates: /etc/wireguard/pri
+  
+        - name: Register private key
+          shell: cat /etc/wireguard/pri
+          register: wg_pri
+          changed_when: false
+  
+        - name: Register public key
+          shell: cat /etc/wireguard/pub
+          register: wg_pub
+          changed_when: false
+  
+        - name: Setup wg0 virtual interface
+          template:
+            src: ../templates/wg0.conf.j2 # Jinja2 template is used for templating the wg0.conf files
+            dest: /etc/wireguard/wg0.conf
+            owner: root
+            group: root
+            mode: 0640
+  
+        - name: Start and enable WireGuard service
+          systemd:
+            state: started
+            enabled: true
+            name: wg-quick@wg0.service
+
+    - name: Unit testing on WireGuard configuration # unit testing for wireguard configuraiton
+      tags: [ never, tests, wg_test ]
+      block: 
+        - name: Check the private key file location
+          stat:
+            path: /etc/wireguard/pri
+          register: pri_key_file
+
+        - name: Test if the private key file exists
+          debug:
+            msg: "[PASS] The private key file exists."
+          when: pri_key_file.stat.exists
+
+        - name: Register private key
+          shell: cat /etc/wireguard/pri
+          register: wg_pri
+          changed_when: false
+
+        - name: Dispaly WireGuard Private Key
+          debug: var=wg_pri.stdout
+
+        - name: Check the public key file location
+          stat:
+            path: /etc/wireguard/pub
+          register: pub_key_file
+
+        - name: Test if the public key file exists
+          debug:
+            msg: "[PASS] The public key file exists."
+          when: pub_key_file.stat.exists
+        
+        - name: Register public key
+          tags: always
+          shell: cat /etc/wireguard/pub
+          register: wg_pub
+          changed_when: false
+        
+        - name: Dispaly WireGuard Public Key
+          debug: var=wg_pub.stdout
+
+    - name: WireGuard peer(s) configuration # this block is only executed on localhost but not on the newly created Linode so 'delegate_to:' must be used.
+      delegate_to: localhost 
+      block:
+        - name: Read users.csv file 
+          read_csv:
+            path: ../wg/users.csv
+          register: users
+
+        - name: Generate WireGuard user(s) keypair and configuration # loop thru users.csv file and produce both server and peers configs
+          include_tasks: wg_user.yml
+          loop: "{{ users.list }}"
+
+    - name: Update WireGuard server's wg0.conf with wg0_peer.conf # this block is executed on the Linode's wireguard server
+      block:
+        - name: Merge wg0_peer.conf into WireGuard server's wg0.conf
+          lineinfile:
+            line: "{{ lookup('file', '../wg/wg0_peer/wg0_peer_{{ ansible_date_time.epoch }}.conf') }}"
+            dest: /etc/wireguard/wg0.conf
+          notify: Restart WireGuard
+  
+  handlers:
+    - name: Restart WireGuard # everytime updating wg0.conf it needs to restart the wireguard service
+      systemd:
+            state: restarted
+            name: wg-quick@wg0.service

@@ -1,0 +1,43 @@
+---
+- name: Create directory for user{{ item.usr }} # ensure that 'user' and its relevant subdirectories are created.
+  file:
+    path: ../wg/user/usr_{{ item.usr }}_{{ item.ip }}/
+    state: directory
+
+- name: Generate WireGuard peer's keypair for user{{ item.usr }} # issue wireguard peer's keypair
+  shell: wg genkey | tee ../wg/user/usr_{{ item.usr }}_{{ item.ip }}/{{ item.usr }}.pri.key | wg pubkey | tee ../wg/user/usr_{{ item.usr }}_{{ item.ip }}/{{ item.usr }}.pub.key
+  args:
+    creates: ../wg/user/usr_{{ item.usr }}_{{ item.ip }}/{{ item.usr }}.pri.key # do not run this task if the private key is already created for idempotency
+
+- name: Generate WireGuard peer's configuration for user{{ item.usr }} # produce wireguard peers' configs with its private key and server public key
+  vars: 
+    prikey: "{{ lookup('file', '../wg/user/usr_{{ item.usr }}_{{ item.ip }}/{{ item.usr }}.pri.key') }}"
+  template:
+    src: ../templates/wg_peer.j2
+    dest: ../wg/user/usr_{{ item.usr }}_{{ item.ip }}/{{ item.usr }}_peer.conf
+
+- name: Generate QRcode for WireGuard peer's configuration for user{{ item.usr }} # encode the peers' configs to QRCode in .png format for mobile devices
+  shell: qrencode -o ../wg/user/usr_{{ item.usr }}_{{ item.ip }}/{{ item.usr }}_peer.png -t png < ../wg/user/usr_{{ item.usr }}_{{ item.ip }}/{{ item.usr }}_peer.conf
+
+- name: Ensures ../wg/_QRCode/ dir exists
+  file: 
+    path: ../wg/_QRCode/  
+    state: directory
+
+- name: Copy user{{ item.usr }} QRcode to _QRCode folder # QRCode collection for easy distribution to the end VPN users
+  copy:
+    src: ../wg/user/usr_{{ item.usr }}_{{ item.ip }}/{{ item.usr }}_peer.png
+    dest: ../wg/_QRCode/user{{ item.usr }}.png
+
+- name: Generate WireGuard server's configuration for user{{ item.usr }} # produce the server side wireguard configs for easy rebuild and idempotency
+  vars: 
+    pubkey: "{{ lookup('file', '../wg/user/usr_{{ item.usr }}_{{ item.ip }}/{{ item.usr }}.pub.key') }}"
+  template:
+    src: ../templates/wg_srv.j2
+    dest: ../wg/user/usr_{{ item.usr }}_{{ item.ip }}/{{ item.usr }}_srv.conf
+
+- name: Merge user{{ item.usr }}_srv.conf into wg0_peer.conf # merge all server side configs into one conf file to directly deliver it to wireguard server and apply
+  lineinfile:
+    line: "{{ lookup('file', '../wg/user/usr_{{ item.usr }}_{{ item.ip }}/{{ item.usr }}_srv.conf') }}"
+    dest: ../wg/wg0_peer/wg0_peer_{{ ansible_date_time.epoch }}.conf
+    create: true

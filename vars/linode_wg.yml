@@ -1,0 +1,20 @@
+ssh_keys: >
+        ['<< Your SSH Public Key Here! >>', '~/.ssh/id_rsa.pub']
+
+hostname: tyla-linode-wg01 # change the hostname as required
+
+type: g6-nanode-1 # change Linode Plan as required. Here it uses the Linode's Shared CPU Nanode (RAM: 1 GB, CPUs: 1 & Storage: 25 GB) as my node
+
+region: ap-south # change the region as required. Here it uses Singapore as my region
+
+image: linode/ubuntu20.04 # change the image as required. Here it uses the Linode's Ubuntu20.04 as my base image
+
+gt: tyla-linode-wg # it uses for group and tag names
+
+wg_ip: '192.168.69.254' # wireguard server wg0 virtual interface IP
+
+my_ip: '1.2.3.4' # your public IP for SSH remote access restriction
+
+password: << Your "ansible-vault encrypt_string 'YourSecretHere' --name 'password'" Output Here! >>  # root password used for the new Linode which is encrypted with ansible-vault for security
+          
+token: << Your "ansible-vault encrypt_string 'YourLinodeAPITokenHere' --name 'token'" Output Here! >> # Linode API Token created on your Linode portal which is encrypted with ansible-vault for security

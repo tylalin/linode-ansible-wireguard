@@ -1,0 +1,13 @@
+---
+# This play is for destroying the running wireguard server on Linode. RUN IT CAREFULLY!
+- name: Delete Linode
+  hosts: localhost
+  vars_files:
+    - ../vars/linode_wg.yml
+
+  tasks:
+    - name: Delete your Linode Instance.
+      linode_v4:
+        label: "{{ hostname }}"
+        access_token: "{{ token }}"
+        state: absent
