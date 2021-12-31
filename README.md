@@ -297,7 +297,7 @@ $ ansible-playbook playbooks/wg_build.yml --tags tests
         - name: Test if /etc/ssh/sshd_config is configured correctly
           assert:
             that:
-              - "'PermitRootLogin yes' in ssh.stdout_lines"
+              - "'PermitRootLogin prohibit-password' in ssh.stdout_lines"
               - "'PubkeyAuthentication yes' in ssh.stdout_lines"
               - "'PasswordAuthentication no' in ssh.stdout_lines"
               - "'PermitEmptyPasswords no' in ssh.stdout_lines"
